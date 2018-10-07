@@ -12,7 +12,6 @@ connection_state_t receiver_state_table[CONNECTION_STATE_END][CONNECTION_EVENT_E
         [SEND_SYNACK] = ESTABLISHED
     },
     [ESTABLISHED] = {
-        [MULTI_TIMEOUT_EVENT] = BROKEN,
         [RCVD_FIN] = FIN_RCVD
     },
     [FIN_RCVD] = {

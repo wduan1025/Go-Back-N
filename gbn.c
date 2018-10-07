@@ -8,9 +8,9 @@ host_session_t host_session;
 gbn_mode_session_t gbn_mode_session;
 gbn_send_session_t gbn_send_session;
 uint8_t fin_pkt_seqnum = -1;
-int gbn_base = 1;
-int gbn_next_seqnum = 1;
-uint8_t gbn_expected_seqnum = 1;
+int gbn_base = 0;
+int gbn_next_seqnum = 0;
+uint8_t gbn_expected_seqnum = 0;
 
 void gbn_init(int sockfd)
 {
@@ -43,6 +43,7 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 	// chunk_start is the starting index of a the chunk in buf that is going to be
 	// sent to receiver.
 	int chunk_start = 0;
+	int reverted = 0;
 
 	// loop until chunk_start >= len(buf ends) and gbn_base == gbn_next_seqnum(window ends)
 	while (chunk_start < len || (gbn_base < gbn_next_seqnum))
@@ -53,7 +54,7 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 		// at state INPROGRESS, append new packet to the end of window and send them.
 		if (gbn_send_session.cur_state == MAKE_AND_SEND)
 		{
-			log_info("[gbn_sender] ******************* [start] INPROGRESS *******************");
+			log_info("[gbn_send] ******************* [start] MAKE_AND_SEND *******************");
 			/* send */
 			while (window_not_full(gbn_base, gbn_next_seqnum, window_size) && chunk_start < len)
 			{
@@ -68,7 +69,7 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 
 				// send_pkt_i is a cycler array, so need to modulo window_size
 				// window_pos = 0, 1, 2, 3
-				int window_pos = (gbn_next_seqnum - 1) % window_size;
+				int window_pos = (gbn_next_seqnum) % window_size;
 				struct gbnhdr new_packet = make_pkt(DATA, gbn_next_seqnum, data, data_len);
 				memcpy(send_q[gbn_mode_session.cur_mode] + window_pos, &new_packet, sizeof(new_packet));
 				log_debug("[gbn_send] packet %d sent", (*(send_q[gbn_mode_session.cur_mode] + window_pos)).seqnum);
@@ -77,14 +78,9 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 					log_error("[gbn_send] packet send failure");
 				}
 				// increment next_seq. seqnum is uint_8_t so it overflows to 1 when reaches 256
-				gbn_next_seqnum = gbn_next_seqnum % 255 + 1;
+				gbn_next_seqnum = (gbn_next_seqnum + 1) % SEQNUM_SIZE;
 			}
-			log_debug("window status: ########################################## ");
-			for (int i = 0; i < window_size; i++)
-			{
-				log_debug("%d", (*(send_q[gbn_mode_session.cur_mode] + i)).seqnum);
-			}
-			log_debug("gbn_base = %d, gbn_next_seqnum = %d ##############################", gbn_base, gbn_next_seqnum);
+
 			// when loop ends normally, window is filled and it's time to wait for ACKs
 			gbn_send_session.cur_state = ACKNOWLEDGE;
 			log_info("[gbn_send] window full or file ended");
@@ -96,60 +92,142 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 		if (gbn_send_session.cur_state == ACKNOWLEDGE)
 		{
 			gbn_send_session.window_shifted = 0;
-			gbn_mode_state_t prev_mode = gbn_mode_session.cur_mode;
+
+			int acked_seqnum = -1;
 
 			while (gbn_base != gbn_next_seqnum && gbn_send_session.cur_state == ACKNOWLEDGE)
 			{
-				log_info("[gbn_sender] ******************* [start] ACKKNOLEDGE *******************");
+				log_info("[gbn_send] ******************* [start] ACKNOWLEDGE *******************");
 				int recv_rc = recvfrom_host(&host_session, &receive_pkt);
 
 				if (recv_rc < 0 || validate_checksum(receive_pkt) < 0)
 				{
-					log_error("[gbn_send] received corrupted packet or returned from timeout handler");
+					log_warn("[gbn_send] received corrupted packet or returned from timeout handler");
 					continue;
 				}
 
 				if (validate_checksum(receive_pkt) != -1 && receive_pkt.type == DATAACK)
 				{
-					int acked_seqnum = receive_pkt.seqnum;
+					acked_seqnum = receive_pkt.seqnum;
 					log_debug("[gbn_send] ack for %d received", acked_seqnum);
-					// if gbn_base shifts, new packets will be sent right after timeout, so go to INPROGRESS
-					// check acked_seqnum > gbn_base
 
-					if ((receive_pkt.seqnum - gbn_base) % 256 < window_size)
+					log_debug("[gbn_send] before, acked_seqnum = %d, gbn_base = %d, gbn_next_seqnum = %d, window_size = %d",
+							  acked_seqnum, gbn_base, gbn_next_seqnum, window_size);
+					//acked_seqnum < gbn_next_seqnum
+					if (compare_valid_diff(acked_seqnum, gbn_next_seqnum) == -1)
 					{
+						log_debug("[gbn_send] acked_seqnum = %d < gbn_next_seqnum = %d", acked_seqnum, gbn_next_seqnum);
 						log_debug("[gbn_send] gbn_base %d upgraded to %d", gbn_base, acked_seqnum + 1);
 						gbn_send_session.window_shifted = 1;
-						gbn_base = receive_pkt.seqnum % 255 + 1;
+						gbn_base = (acked_seqnum + 1) % SEQNUM_SIZE;
+					}
+					//acked_seqnum >= gbn_next_seqnum
+					else
+					{
+						log_debug("[gbn_send] acked_seqnum >= gbn_next_seqnum");
+
+						int pre_gbn_next_seqnum = gbn_next_seqnum;
+						log_debug("[gbn_send] pre_gbn_next_seqnum = %d", pre_gbn_next_seqnum);
+
+						gbn_next_seqnum = (acked_seqnum + 1) % SEQNUM_SIZE;
+						log_debug("[gbn_send] gbn_next_seqnum = %d", gbn_next_seqnum);
+
+						gbn_base = gbn_next_seqnum;
+						log_debug("[gbn_send] gbn_base = %d", gbn_base);
+
+						int chunk_move = mod(gbn_next_seqnum - pre_gbn_next_seqnum, SEQNUM_SIZE);
+						log_debug("[gbn_send] chunk_move = %d", chunk_move);
+
+						log_debug("[gbn_send] chunk_start = %d", chunk_start);
+						chunk_start += chunk_move * DATALEN;
+						log_debug("[gbn_send] chunk_start = %d", chunk_start);
+
+						gbn_send_session.window_shifted = 1;
+
+						reverted = 1;
 					}
 
-					log_debug("[gbn_send] gbn_base is %d, gbn_next_seqnum is %d", gbn_base, gbn_next_seqnum);
+					log_debug("[gbn_send] after, acked_seqnum = %d, gbn_base = %d, gbn_next_seqnum = %d, window_size = %d",
+							  acked_seqnum, gbn_base, gbn_next_seqnum, window_size);
+
 					signal(SIGALRM, timeout_wait_dataack_handler);
 					alarm(TIMEOUT);
-					log_debug("dfsjfkjdfk");
 				}
 			}
 
-			log_debug("gbn_send_session.cur_state = %d", gbn_send_session.cur_state);
-			log_debug("gbn_send_session.window_shifted = %d", gbn_send_session.window_shifted);
+			log_debug("[gbn_send] gbn_send_session.cur_state = %d", gbn_send_session.cur_state);
+			log_debug("[gbn_send] gbn_send_session.window_shifted = %d", gbn_send_session.window_shifted);
 
-			// if return because gbn_base hits gbn_next_seqnum, should ACCELERATE.
-			if (gbn_base == gbn_next_seqnum)
-			{
-				gbn_mode_session.cur_mode = lookup_gbn_mode_transit(&gbn_mode_session, ACCELERATE);
-			}
-			else
-			{
-				gbn_mode_session.cur_mode = lookup_gbn_mode_transit(&gbn_mode_session, DECELERATE);
+			gbn_mode_state_t prev_mode = gbn_mode_session.cur_mode;
 
-				if (prev_mode > gbn_mode_session.cur_mode)
+			if (reverted != 1)
+			{
+				// if return because gbn_base hits gbn_next_seqnum, should ACCELERATE.
+				if (gbn_base == gbn_next_seqnum)
 				{
-					chunk_start -= ((gbn_next_seqnum - gbn_base + 255) % 255) * DATALEN;
-					gbn_next_seqnum = gbn_base;
+					gbn_mode_session.cur_mode = lookup_gbn_mode_transit(&gbn_mode_session, ACCELERATE);
+				}
+				else
+				{
+					gbn_mode_session.cur_mode = lookup_gbn_mode_transit(&gbn_mode_session, DECELERATE);
+
+					if (prev_mode > gbn_mode_session.cur_mode)
+					{
+						log_debug("[gbn_send] mode decreased");
+						log_debug("[gbn_send] acked_seqnum = %d, gbn_base = %d", acked_seqnum, gbn_base);
+
+						// if (acked_seqnum >= gbn_base)
+						if (compare_valid_diff(gbn_base, acked_seqnum) != 1)
+						{
+							log_debug("[gbn_send] acked_seqnum >= gbn_base");
+
+							log_debug("[gbn_send] acked_seqnum = %d", acked_seqnum);
+							log_debug("[gbn_send] old gbn_base = %d", gbn_base);
+
+							int pre_gbn_next_seqnum = gbn_next_seqnum;
+							log_debug("[gbn_send] pre_gbn_next_seqnum = %d", pre_gbn_next_seqnum);
+
+							gbn_next_seqnum = (acked_seqnum + 1) % SEQNUM_SIZE;
+							log_debug("[gbn_send] gbn_next_seqnum = %d", gbn_next_seqnum);
+
+							gbn_base = gbn_next_seqnum;
+							log_debug("[gbn_send] gbn_base = %d", gbn_base);
+
+							int chunk_move = mod(pre_gbn_next_seqnum - gbn_next_seqnum, SEQNUM_SIZE);
+							log_debug("[gbn_send] chunk_move = %d", chunk_move);
+
+							log_debug("[gbn_send] chunk_start = %d", chunk_start);
+							chunk_start -= chunk_move * DATALEN;
+							log_debug("[gbn_send] chunk_start = %d", chunk_start);
+						}
+						// gbn_base > acked_num
+						else
+						{
+							log_debug("[gbn_send] gbn_base > acked_num");
+
+							log_debug("[gbn_send] acked_seqnum = %d", acked_seqnum);
+							log_debug("[gbn_send] old gbn_base = %d", gbn_base);
+
+							int pre_gbn_next_seqnum = gbn_next_seqnum;
+							log_debug("[gbn_send] pre_gbn_next_seqnum = %d", pre_gbn_next_seqnum);
+
+							gbn_next_seqnum = gbn_base;
+							log_debug("[gbn_send] gbn_next_seqnum = %d", gbn_next_seqnum);
+
+							int chunk_move = mod(pre_gbn_next_seqnum - gbn_next_seqnum, SEQNUM_SIZE);
+							log_debug("[gbn_send] chunk_move = %d", chunk_move);
+
+							log_debug("[gbn_send] chunk_start = %d", chunk_start);
+							chunk_start -= chunk_move * DATALEN;
+							log_debug("[gbn_send] chunk_start = %d", chunk_start);
+						}
+					}
 				}
 			}
 
-			if (gbn_send_session.window_shifted || prev_mode > gbn_mode_session.cur_mode)
+			reverted = 0;
+
+			if (gbn_send_session.window_shifted || prev_mode != gbn_mode_session.cur_mode)
 			{
 				gbn_send_session.cur_state = lookup_gbn_send_transit(&gbn_send_session, BASE_SHIFTED);
 			}
@@ -160,10 +238,10 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags)
 		// no useful ACK received during ACKNOWLEDGE, resend all packets in window
 		if (gbn_send_session.cur_state == RESEND)
 		{
-			log_info("[gbn_sender] ******************* [start] TIMEOUT RESEND *******************");
+			log_info("[gbn_sender] ******************* [start] RESEND *******************");
 			// iterating in a cycling array
 			int counter = 0;
-			int window_pos = (gbn_base - 1) % window_size;
+			int window_pos = (gbn_base) % window_size;
 
 			while (counter < window_size)
 			{
@@ -195,7 +273,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 	memset(&send_pkt, 0, sizeof(send_pkt));
 	memset(&receive_pkt, 0, sizeof(receive_pkt));
 
-	send_pkt = make_pkt(DATAACK, gbn_expected_seqnum - 1, NULL, 0);
+	send_pkt = make_pkt(DATAACK, (gbn_expected_seqnum - 1) % SEQNUM_SIZE, NULL, 0);
 	log_info("[gbn_recv] ******************* [start] receiving DATA gbn_expected_seqnum = %d *******************", gbn_expected_seqnum);
 
 	/* when receiving non-valid packets, corrupted packets, incorrect seqnum, must continue to receive */
@@ -203,33 +281,20 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 	{
 		int receive_rc = -1;
 
-		/* If receiver does not receive any packets within MAX_TIMEOUT_COUNT*TIMEOUT seconds, connection is broken.
-		   Receiver will self close the connection without handshake.
-		*/
-		signal(SIGALRM, timeout_no_pkt_handler);
-		alarm(MAX_TIMEOUT_COUNT * TIMEOUT);
-
 		receive_rc = recvfrom_host(&host_session, &receive_pkt);
+
 		if (receive_rc < 0 || validate_checksum(receive_pkt) < 0)
 		{
-			log_error("[gbn_recv] lost packet or received corrupted packet, receive_rc = %d", receive_rc);
-			log_debug("[gbn_recv] sending ack packet for seqnum %d", send_pkt.seqnum);
-
-			if (sendto_host(&host_session, &send_pkt) < 0)
-			{
-				return -1;
-			}
+			log_warn("[gbn_recv] lost packet or received corrupted packet, receive_rc = %d", receive_rc);
 
 			continue;
 		}
-
-		/* if receive packets, reset TIMER */
-		alarm(MAX_TIMEOUT_COUNT * TIMEOUT);
 
 		if (validate_checksum(receive_pkt) != -1)
 		{
 			log_trace("[gbn_recv] packet not corrupted, packet.type = %d", receive_pkt.type);
 
+			// if pkt type = DATA
 			if (receive_pkt.type == DATA)
 			{
 				log_debug("[gbn_recv] received DATA, seqnum %d, expected seqnum %d",
@@ -248,7 +313,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 						receive_data++;
 					}
 					log_debug("[gbn_recv] gbn_expected_seqnum from %d to %d",
-							  gbn_expected_seqnum, gbn_expected_seqnum % 255 + 1);
+							  gbn_expected_seqnum, (gbn_expected_seqnum + 1) % SEQNUM_SIZE);
 
 					// send packet and update expected sequence number
 					send_pkt = make_pkt(DATAACK, gbn_expected_seqnum, NULL, 0);
@@ -257,7 +322,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 					{
 						return -1;
 					}
-					gbn_expected_seqnum = gbn_expected_seqnum % 255 + 1;
+					gbn_expected_seqnum = (gbn_expected_seqnum + 1) % SEQNUM_SIZE;
 
 					return receive_pkt.datalen;
 				}
@@ -269,11 +334,12 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 					{
 						return -1;
 					}
-					log_error("[gbn_recv] received empty packet or incorrect seqnum");
+					log_warn("[gbn_recv] received empty packet or incorrect seqnum");
 
 					continue;
 				}
 			}
+			// if pkt type = FIN, end gbn_recv
 			else if (receive_pkt.type == FIN)
 			{
 				log_info("[gbn_recv] received packet.type = FIN, seqnum = %d", receive_pkt.seqnum);
@@ -290,7 +356,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 				{
 					return -1;
 				}
-				log_error("[gbn_recv] receive unexpected packet.type = %d", receive_pkt.type);
+				log_warn("[gbn_recv] receive unexpected packet.type = %d", receive_pkt.type);
 
 				continue;
 			}
@@ -302,7 +368,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags)
 			{
 				return -1;
 			}
-			log_error("[gbn_recv] packet corrupted.");
+			log_warn("[gbn_recv] packet corrupted.");
 
 			continue;
 		}
@@ -360,10 +426,6 @@ int gbn_sender_close(int sockfd)
 				return (-1);
 			}
 
-			/* start count timeout for FIN, waiting to receive FINACK */
-			signal(SIGALRM, timeout_wait_finack_handler);
-			alarm(TIMEOUT);
-
 			/* change to FIN_SENT */
 			host_session.cur_state = lookup_connect_transit(&host_session, SEND_FIN);
 			log_info("[gbn_sender_close] Current state FIN_SENT(6): %d", host_session.cur_state);
@@ -377,7 +439,7 @@ int gbn_sender_close(int sockfd)
 			if (receive_rc < 0 || validate_checksum(packet_finack) < 0)
 			{
 				/* if interrupted (func error / not receiving FINACK), rc = -1, we re-loop the while to re-send FIN */
-				log_error("[gbn_recv] lost packet or received corrupted packet");
+				log_warn("[gbn_recv] lost packet or received corrupted packet");
 				continue;
 			}
 
@@ -397,7 +459,7 @@ int gbn_sender_close(int sockfd)
 
 		if (host_session.cur_state == BROKEN)
 		{
-			log_error("[gbn_sender_close] host_session.cur_state = BROKEN");
+			log_warn("[gbn_sender_close] host_session.cur_state = BROKEN");
 			close(sockfd);
 			return -1;
 		}
@@ -459,7 +521,7 @@ int gbn_receiver_close(int sockfd)
 			int receive_rc = recvfrom_host(&host_session, &packet_fin);
 			if (receive_rc < 0 || validate_checksum(packet_fin) < 0)
 			{
-				log_error("[gbn_receiver_close] lost packet or received corrupted packet");
+				log_warn("[gbn_receiver_close] lost packet or received corrupted packet");
 				continue;
 			}
 
@@ -533,7 +595,7 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen)
 			if (receive_rc < 0 || validate_checksum(packet_synack) < 0)
 			{
 				/* if interrupted, rc = -1, we re-loop the while to re-send SYN */
-				log_error("[gbn_connect] lost packet or received corrupted packet");
+				log_warn("[gbn_connect] lost packet or received corrupted packet");
 				continue;
 			}
 
@@ -552,7 +614,7 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen)
 
 		if (host_session.cur_state == BROKEN)
 		{
-			log_error("[gbn_connect] Connection setup failed after %d seconds", MAX_TIMEOUT_COUNT);
+			log_warn("[gbn_connect] Connection setup failed after %d seconds", MAX_TIMEOUT_COUNT);
 			return -1;
 		}
 	}
@@ -626,7 +688,7 @@ int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen)
 
 			if (validate_checksum(packet_syn) < 0 || packet_syn.type != SYN)
 			{
-				log_error("[gbn_accept] lost packet or received corrupted packet");
+				log_warn("[gbn_accept] lost packet or received corrupted packet");
 				continue;
 			}
 

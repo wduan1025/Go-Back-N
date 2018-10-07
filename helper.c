@@ -1,4 +1,34 @@
 #include "helper.h"
+
+int mod(int a, int b)
+{
+    return (a % b + b) % b;
+}
+
+int compare_valid_diff(uint8_t a, uint8_t b)
+{
+    int diff = mod(a - b, SEQNUM_SIZE);
+    log_debug("[compare_valid_diff] diff = %d", diff);
+
+    if (diff < (SEQNUM_SIZE / 2))
+    {
+        return 1; // a is bigger
+    }
+    else if (diff > (SEQNUM_SIZE) / 2)
+    {
+        return -1; // b is bigger
+    }
+    else if (diff == 0)
+    {
+        return 0;
+    }
+    else
+    {
+        log_error("[compare_valid_diff] unexpected value a = %d, b = %d", a, b);
+        exit(-1);
+    }
+}
+
 connection_state_t lookup_connect_transit(host_session_t *host_session, connection_event_t event)
 {
     if (host_session->cur_state >= CONNECTION_STATE_END || event >= CONNECTION_EVENT_END || host_session->cur_state < 0 || event < 0)
@@ -120,7 +150,7 @@ uint8_t has_seqnum(struct gbnhdr *packet, uint8_t seqnum)
 int window_not_full(int base, int seqnum, int window_size)
 {
     if (seqnum < base)
-        seqnum += 255;
+        seqnum += SEQNUM_SIZE;
     return seqnum < base + window_size;
 }
 

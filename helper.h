@@ -4,6 +4,8 @@
 #include "state.h"
 #include "gbn.h"
 
+int mod(int a, int b);
+int compare_valid_diff(uint8_t a, uint8_t b);
 connection_state_t lookup_connect_transit(host_session_t *host_session, connection_event_t event);
 gbn_mode_state_t lookup_gbn_mode_transit(gbn_mode_session_t *gbn_mode_session, gbn_mode_event_t event);
 gbn_send_state_t lookup_gbn_send_transit(gbn_send_session_t *gbn_send_session, gbn_send_event_t event);

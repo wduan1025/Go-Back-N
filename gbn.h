@@ -23,12 +23,17 @@ extern int h_errno;
 extern int errno;
 
 /*----- Protocol parameters -----*/
-#define LOSS_PROB 1e-1    	  	/* loss probability                            */
-#define CORR_PROB 1e-3   		/* corruption probability                      */
+#define LOSS_PROB 1e-2      /* loss probability                            */
+#define CORR_PROB 1e-3   	/* corruption probability                      */
 #define DATALEN   1024    	/* length of the payload                       */
 #define N         1024    	/* Max number of packets a single call to gbn_send can process */
 #define TIMEOUT      1    	/* timeout to resend packets (1 second)        */
-#define MAX_TIMEOUT_COUNT 8	/* Number of timeouts to break the connection  */
+#define MAX_TIMEOUT_COUNT 8 /* Number of timeouts to break the connection, */
+							/* increase to 8 seconds, in case you want to test high loss */
+							/* The default value is 5 */
+#define MAX_SEQNUM 255		/* Maximum possible value of seqnum 		   */
+#define SEQNUM_SIZE 256
+
 /*----- Packet types -----*/
 #define SYN      0        	/* Opens a connection                          */
 #define SYNACK   1        	/* Acknowledgement of the SYN packet           */

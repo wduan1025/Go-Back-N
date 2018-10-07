@@ -4,13 +4,6 @@
 int timeout_synack_count = 0;
 int timeout_finack_count = 0;
 
-void timeout_no_pkt_handler(int sig)
-{
-    log_info("[timeout_no_pkt_handler] Entering");
-    host_session.cur_state = lookup_connect_transit(&host_session, MULTI_TIMEOUT_EVENT);
-    log_error("No data packets coming. Connection broken");
-}
-
 /* if time out, change state to CLOSED or BROKEN*/
 void timeout_wait_synack_handler(int sig)
 {
@@ -54,6 +47,6 @@ void timeout_to_close_handler(int sig)
     log_info("[timeout_to_close_handler] Entering");
 
     host_session.cur_state = lookup_connect_transit(&host_session, MULTI_TIMEOUT_EVENT);
-    log_info("[gbn_receiver_close] Current state CLOSED(0): %d", host_session.cur_state);
-    log_info("[gbn_receiver_close] The connection is going to be gracefully closed");
+    log_info("[timeout_to_close_handler] Current state CLOSED(0): %d", host_session.cur_state);
+    log_info("[timeout_to_close_handler] The connection is going to be gracefully closed");
 }
