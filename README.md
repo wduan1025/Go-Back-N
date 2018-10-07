@@ -1,5 +1,5 @@
 # Go-Back-N
-An implementation of Go-Back-N protocol.This is a collaborative work with [kennch](https://github.com/kennch). I'm implemented gbn_send() and gbn_recv(), and we both debugged all functions.
+An implementation of Go-Back-N protocol.This is a teamwork with [kennch](https://github.com/kennch). An article about our implementation can be found [here](https://medium.com/@wd255/go-back-n-protocol-implementation-7abc8a578e58).
 ## Feature
 * Cycler array is used to store packet window, making it compatible for transfering unlimited larget file.
 * Dynamically swtiching window size among 1,2, and 4 based on TIMEOUT event. When all ACKs received, switch to larger window size, but when there is ACK loss, slow down to size 1 window
